@@ -2,9 +2,12 @@
 # Usage: docker compose up -d
 #
 # URLs (after start):
-#   onprem_1:  http://localhost:8181
-#   onprem_2:  http://localhost:8282
-#   cloud_idp: http://localhost:8080
+#   onprem_1:  main http://localhost:8181  |  management (health/metrics) http://localhost:9191
+#   onprem_2:  main http://localhost:8282  |  management http://localhost:9292
+#   cloud_idp: main http://localhost:8080  |  management http://localhost:9090
+#
+# /health/* lives on the management port (KC_HTTP_MANAGEMENT_PORT), not on the main port.
+# See https://www.keycloak.org/server/management-interface
 #
 # Default admin (each instance): admin / admin
 
@@ -35,8 +38,13 @@ services:
       KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:-admin}
       KC_HOSTNAME_STRICT: "false"
       KC_HTTP_ENABLED: "true"
+      KC_HEALTH_ENABLED: "true"
+      KC_METRICS_ENABLED: "true"
+      KC_HTTP_MANAGEMENT_PORT: "9000"
+      KC_HTTP_MANAGEMENT_HEALTH_ENABLED: "true"
     ports:
       - "8181:8080"
+      - "9191:9000"
     depends_on:
       postgres_onprem_1:
         condition: service_healthy
@@ -67,8 +75,13 @@ services:
       KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:-admin}
       KC_HOSTNAME_STRICT: "false"
       KC_HTTP_ENABLED: "true"
+      KC_HEALTH_ENABLED: "true"
+      KC_METRICS_ENABLED: "true"
+      KC_HTTP_MANAGEMENT_PORT: "9000"
+      KC_HTTP_MANAGEMENT_HEALTH_ENABLED: "true"
     ports:
       - "8282:8080"
+      - "9292:9000"
     depends_on:
       postgres_onprem_2:
         condition: service_healthy
@@ -89,7 +102,10 @@ services:
 
   keycloak_cloud_idp:
     image: quay.io/keycloak/keycloak:26.0.5
-    command: start-dev
+    # Organizations admin API / realm toggle require the organization feature on the server.
+    command: ["start-dev", "--features", "organization"]
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
       KC_DB: postgres
       KC_DB_URL: jdbc:postgresql://postgres_cloud_idp:5432/keycloak
@@ -99,8 +115,13 @@ services:
       KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:-admin}
       KC_HOSTNAME_STRICT: "false"
       KC_HTTP_ENABLED: "true"
+      KC_HEALTH_ENABLED: "true"
+      KC_METRICS_ENABLED: "true"
+      KC_HTTP_MANAGEMENT_PORT: "9000"
+      KC_HTTP_MANAGEMENT_HEALTH_ENABLED: "true"
     ports:
       - "8080:8080"
+      - "9090:9000"
     depends_on:
       postgres_cloud_idp:
         condition: service_healthy
