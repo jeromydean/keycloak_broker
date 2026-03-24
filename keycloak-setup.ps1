@@ -389,7 +389,8 @@ function Get-OrganizationIdByAlias {
     [string] $Alias
   )
   $headers = @{ Authorization = "Bearer $Token" }
-  $uri = "$CloudBase/admin/realms/$Realm/organizations?search=$Alias&exact=true&max=50&briefRepresentation=true"
+  # Keycloak "search" matches organization *name* or *domain*, not alias. List and filter by alias.
+  $uri = "$CloudBase/admin/realms/$Realm/organizations?first=0&max=500&briefRepresentation=true"
   try {
     $list = Invoke-RestMethod -Method Get -Uri $uri -Headers $headers
   }
@@ -452,6 +453,27 @@ function New-OrganizationIfMissing {
   return $orgId
 }
 
+function Get-KeycloakAdminErrorBody {
+  param($ErrorRecord)
+  if ($ErrorRecord.ErrorDetails -and $ErrorRecord.ErrorDetails.Message) {
+    return $ErrorRecord.ErrorDetails.Message
+  }
+  $r = $ErrorRecord.Exception.Response
+  if (-not $r) { return $null }
+  try {
+    if ($r -is [System.Net.Http.HttpResponseMessage]) {
+      return $r.Content.ReadAsStringAsync().GetAwaiter().GetResult()
+    }
+    $reader = [System.IO.StreamReader]::new($r.GetResponseStream())
+    $text = $reader.ReadToEnd()
+    $reader.Dispose()
+    return $text
+  }
+  catch {
+    return $null
+  }
+}
+
 function Add-IdentityProviderToOrganizationIfMissing {
   param(
     [string] $CloudBase,
@@ -460,21 +482,44 @@ function Add-IdentityProviderToOrganizationIfMissing {
     [string] $OrganizationId,
     [string] $IdpAlias
   )
+  # Admin console links an IdP to an org by PUT /identity-provider/instances/{alias} with
+  # IdentityProviderRepresentation.organizationId set (full body from GET, not POST .../organizations/.../identity-providers).
   $headers = @{ Authorization = "Bearer $Token" }
-  $uri = "$CloudBase/admin/realms/$Realm/organizations/$OrganizationId/identity-providers"
-  # Keycloak expects a JSON-encoded string (alias or internal id); see OrganizationIdentityProvidersResource.addIdentityProvider
-  $payload = '"' + $IdpAlias.Replace('"', '\"') + '"'
+  $idpUri = "$CloudBase/admin/realms/$Realm/identity-provider/instances/$IdpAlias"
   try {
-    Invoke-WebRequest -Method Post -Uri $uri -Headers $headers -Body $payload -ContentType "application/json" -UseBasicParsing | Out-Null
-    Write-Host "  Linked IdP '$IdpAlias' to organization id=$OrganizationId"
+    $idp = Invoke-RestMethod -Method Get -Uri $idpUri -Headers $headers
   }
   catch {
-    $code = $_.Exception.Response.StatusCode.value__
-    if ($code -eq 409) {
-      Write-Host "  IdP '$IdpAlias' already linked to organization id=$OrganizationId"
-      return
+    $err = Get-KeycloakAdminErrorBody -ErrorRecord $_
+    throw "Cannot load IdP '$IdpAlias' for org link: $($_.Exception.Message) $err"
+  }
+  $currentOrg = $null
+  if ($idp.PSObject.Properties.Name -contains "organizationId") {
+    $currentOrg = $idp.organizationId
+  }
+  if ($currentOrg -and [string]$currentOrg -ieq [string]$OrganizationId) {
+    Write-Host "  IdP '$IdpAlias' already linked to organization id=$OrganizationId"
+    return
+  }
+  if ($idp.PSObject.Properties.Name -contains "organizationId") {
+    $idp.organizationId = $OrganizationId
+  }
+  else {
+    $idp | Add-Member -NotePropertyName organizationId -NotePropertyValue $OrganizationId -Force
+  }
+  $json = $idp | ConvertTo-Json -Depth 30 -Compress
+  try {
+    Invoke-WebRequest -Method Put -Uri $idpUri -Headers $headers -Body $json `
+      -ContentType "application/json; charset=utf-8" -UseBasicParsing | Out-Null
+    Write-Host "  Linked IdP '$IdpAlias' to organization id=$OrganizationId (PUT identity-provider/instances, same as admin UI)"
+  }
+  catch {
+    $status = $null
+    if ($_.Exception.Response) {
+      $status = [int]$_.Exception.Response.StatusCode
     }
-    throw
+    $errBody = Get-KeycloakAdminErrorBody -ErrorRecord $_
+    throw "Link IdP '$IdpAlias' to org $OrganizationId failed (HTTP $status): $errBody"
   }
 }
 
@@ -527,12 +572,12 @@ New-RealmIfMissing -KeycloakBase $CloudPublicBase -Token $tokenCloud -RealmRep $
 Enable-RealmOrganizationsIfNeeded -CloudBase $CloudPublicBase -Token $tokenCloud -Realm $CloudRealm
 
 $orgAccountRedirect = "$CloudPublicBase/realms/$CloudRealm/account"
-New-OrganizationIfMissing -CloudBase $CloudPublicBase -Token $tokenCloud -Realm $CloudRealm `
+$org1Id = New-OrganizationIfMissing -CloudBase $CloudPublicBase -Token $tokenCloud -Realm $CloudRealm `
   -Alias $Org1Alias -Name $Org1DisplayName -RedirectUrl $orgAccountRedirect `
-  -Description "Tenant for onprem_1; IdP $IdpAlias1" -DomainName $Org1DomainName | Out-Null
-New-OrganizationIfMissing -CloudBase $CloudPublicBase -Token $tokenCloud -Realm $CloudRealm `
+  -Description "Tenant for onprem_1; IdP $IdpAlias1" -DomainName $Org1DomainName
+$org2Id = New-OrganizationIfMissing -CloudBase $CloudPublicBase -Token $tokenCloud -Realm $CloudRealm `
   -Alias $Org2Alias -Name $Org2DisplayName -RedirectUrl $orgAccountRedirect `
-  -Description "Tenant for onprem_2; IdP $IdpAlias2" -DomainName $Org2DomainName | Out-Null
+  -Description "Tenant for onprem_2; IdP $IdpAlias2" -DomainName $Org2DomainName
 
 New-OidcIdentityProviderIfMissing -CloudBase $CloudPublicBase -Token $tokenCloud -Realm $CloudRealm `
   -Alias $IdpAlias1 -DisplayName "Customer On-Prem 1" -ClientId $BrokerClientId -ClientSecret $BrokerSecretOnPrem1 `
@@ -545,8 +590,12 @@ New-OidcIdentityProviderIfMissing -CloudBase $CloudPublicBase -Token $tokenCloud
 New-UsernameTemplateMapperIfMissing -CloudBase $CloudPublicBase -Token $tokenCloud -Realm $CloudRealm -IdpAlias $IdpAlias1
 New-UsernameTemplateMapperIfMissing -CloudBase $CloudPublicBase -Token $tokenCloud -Realm $CloudRealm -IdpAlias $IdpAlias2
 
-$org1Id = Get-OrganizationIdByAlias -CloudBase $CloudPublicBase -Token $tokenCloud -Realm $CloudRealm -Alias $Org1Alias
-$org2Id = Get-OrganizationIdByAlias -CloudBase $CloudPublicBase -Token $tokenCloud -Realm $CloudRealm -Alias $Org2Alias
+if (-not $org1Id) {
+  $org1Id = Get-OrganizationIdByAlias -CloudBase $CloudPublicBase -Token $tokenCloud -Realm $CloudRealm -Alias $Org1Alias
+}
+if (-not $org2Id) {
+  $org2Id = Get-OrganizationIdByAlias -CloudBase $CloudPublicBase -Token $tokenCloud -Realm $CloudRealm -Alias $Org2Alias
+}
 if ($org1Id) {
   Add-IdentityProviderToOrganizationIfMissing -CloudBase $CloudPublicBase -Token $tokenCloud -Realm $CloudRealm `
     -OrganizationId $org1Id -IdpAlias $IdpAlias1

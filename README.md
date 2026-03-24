@@ -35,7 +35,7 @@ The **cloud** Keycloak service includes `extra_hosts: host.docker.internal:host-
 
 ## Organizations (cloud realm)
 
-**`keycloak-setup.ps1`** turns on **`organizationsEnabled`** on the **`cloud`** realm, creates organizations **`org1`** and **`org2`**, and **links** identity providers **`onprem-1`** and **`onprem-2`** to them so they appear as linked organizations in the admin console (see [management interface](https://www.keycloak.org/server/management-interface) / Organizations in server docs).
+**`keycloak-setup.ps1`** turns on **`organizationsEnabled`** on the **`cloud`** realm, creates organizations **`org1`** and **`org2`**, and **links** identity providers **`onprem-1`** and **`onprem-2`** to them so each IdP appears under **Organization → Identity providers** in the admin UI (not only under realm **Identity providers**). Re-run the script if linking was skipped earlier (older script versions resolved org IDs using the wrong search API).
 
 **`keycloak_cloud_idp`** is started with **`--features=organization`** so the Organizations Admin API exists on that instance. On-prem Keycloak containers do not need this unless you use organizations there too.
 
