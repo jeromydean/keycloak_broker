@@ -9,7 +9,7 @@ namespace TestClient
   internal static class Program
   {
     /// <summary>Issuer base URL (no trailing slash). MSAL loads discovery from {Authority}/.well-known/openid-configuration.</summary>
-    private const string OidcAuthority = "http://localhost:8181/realms/onprem";
+    private const string OidcAuthority = "https://localhost:8181/realms/onprem";
 
     /// <summary>Public client created by keycloak-setup.ps1 in realm <c>onprem</c>.</summary>
     private const string ClientId = "msal-onprem";

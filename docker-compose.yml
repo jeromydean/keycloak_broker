@@ -1,12 +1,18 @@
 # POC: three Keycloak realms stacks (each with its own Postgres).
-# Usage: docker compose up -d
+# Usage:
+#   1. Run .\initial-setup.ps1 (elevated) to create certs\*.pfx and trust them in LocalMachine\Root.
+#   2. docker compose up -d
 #
 # URLs (after start):
-#   onprem_1:  main http://localhost:8181  |  management (health/metrics) http://localhost:9191
-#   onprem_2:  main http://localhost:8282  |  management http://localhost:9292
-#   cloud_idp: main http://localhost:8080  |  management http://localhost:9090
+#   User-facing HTTPS (main):
+#     onprem_1:  https://localhost:8181  |  management https://localhost:9191
+#     onprem_2:  https://localhost:8282  |  management https://localhost:9292
+#     cloud_idp: https://localhost:8080  |  management https://localhost:9090
+#   HTTP backchannel only (cloud container -> host; plain HTTP on internal Keycloak port 8080):
+#     onprem_1: http://host.docker.internal:8182
+#     onprem_2: http://host.docker.internal:8283
 #
-# /health/* lives on the management port (KC_HTTP_MANAGEMENT_PORT), not on the main port.
+# /health/* lives on the management port (KC_HTTP_MANAGEMENT_PORT), not on the main public HTTPS port; use https://localhost:9191 etc. when TLS is on.
 # See https://www.keycloak.org/server/management-interface
 #
 # Default admin (each instance): admin / admin
@@ -37,13 +43,21 @@ services:
       KC_BOOTSTRAP_ADMIN_USERNAME: ${KEYCLOAK_ADMIN:-admin}
       KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:-admin}
       KC_HOSTNAME_STRICT: "false"
+      KC_HOSTNAME_URL: "https://localhost:8181"
       KC_HTTP_ENABLED: "true"
+      KC_HTTP_PORT: "8080"
+      KC_HTTPS_PORT: "8443"
+      KC_HTTPS_KEY_STORE_FILE: /opt/keycloak/keystore.pfx
+      KC_HTTPS_KEY_STORE_PASSWORD: ${KEYCLOAK_KEYSTORE_PASSWORD:-password}
       KC_HEALTH_ENABLED: "true"
       KC_METRICS_ENABLED: "true"
       KC_HTTP_MANAGEMENT_PORT: "9000"
       KC_HTTP_MANAGEMENT_HEALTH_ENABLED: "true"
+    volumes:
+      - ./certs/keycloak-onprem-1.pfx:/opt/keycloak/keystore.pfx:ro
     ports:
-      - "8181:8080"
+      - "8181:8443"
+      - "8182:8080"
       - "9191:9000"
     depends_on:
       postgres_onprem_1:
@@ -74,13 +88,21 @@ services:
       KC_BOOTSTRAP_ADMIN_USERNAME: ${KEYCLOAK_ADMIN:-admin}
       KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:-admin}
       KC_HOSTNAME_STRICT: "false"
+      KC_HOSTNAME_URL: "https://localhost:8282"
       KC_HTTP_ENABLED: "true"
+      KC_HTTP_PORT: "8080"
+      KC_HTTPS_PORT: "8443"
+      KC_HTTPS_KEY_STORE_FILE: /opt/keycloak/keystore.pfx
+      KC_HTTPS_KEY_STORE_PASSWORD: ${KEYCLOAK_KEYSTORE_PASSWORD:-password}
       KC_HEALTH_ENABLED: "true"
       KC_METRICS_ENABLED: "true"
       KC_HTTP_MANAGEMENT_PORT: "9000"
       KC_HTTP_MANAGEMENT_HEALTH_ENABLED: "true"
+    volumes:
+      - ./certs/keycloak-onprem-2.pfx:/opt/keycloak/keystore.pfx:ro
     ports:
-      - "8282:8080"
+      - "8282:8443"
+      - "8283:8080"
       - "9292:9000"
     depends_on:
       postgres_onprem_2:
@@ -114,13 +136,20 @@ services:
       KC_BOOTSTRAP_ADMIN_USERNAME: ${KEYCLOAK_ADMIN:-admin}
       KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:-admin}
       KC_HOSTNAME_STRICT: "false"
+      KC_HOSTNAME_URL: "https://localhost:8080"
       KC_HTTP_ENABLED: "true"
+      KC_HTTP_PORT: "8080"
+      KC_HTTPS_PORT: "8443"
+      KC_HTTPS_KEY_STORE_FILE: /opt/keycloak/keystore.pfx
+      KC_HTTPS_KEY_STORE_PASSWORD: ${KEYCLOAK_KEYSTORE_PASSWORD:-password}
       KC_HEALTH_ENABLED: "true"
       KC_METRICS_ENABLED: "true"
       KC_HTTP_MANAGEMENT_PORT: "9000"
       KC_HTTP_MANAGEMENT_HEALTH_ENABLED: "true"
+    volumes:
+      - ./certs/keycloak-cloud-idp.pfx:/opt/keycloak/keystore.pfx:ro
     ports:
-      - "8080:8080"
+      - "8080:8443"
       - "9090:9000"
     depends_on:
       postgres_cloud_idp:

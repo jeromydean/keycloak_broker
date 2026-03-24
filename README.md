@@ -4,11 +4,13 @@ This repository includes a Docker Compose stack for a proof of concept with **th
 
 ## Layout
 
-| Instance    | Keycloak URL                    | Host port | Postgres service       |
-|-------------|---------------------------------|-----------|-------------------------|
-| `onprem_1`  | http://localhost:8181 (main), http://localhost:9191 (management) | 8181, 9191 | `postgres_onprem_1` |
-| `onprem_2`  | http://localhost:8282 (main), http://localhost:9292 (management) | 8282, 9292 | `postgres_onprem_2` |
-| `cloud_idp` | http://localhost:8080 (main), http://localhost:9090 (management) | 8080, 9090 | `postgres_cloud_idp` |
+| Instance    | Keycloak URL | Postgres service |
+|-------------|--------------|------------------|
+| `onprem_1`  | **HTTPS** `https://localhost:8181` (main), **HTTP** `http://localhost:8182` (backchannel from cloud only), management **`https://localhost:9191`** | `postgres_onprem_1` |
+| `onprem_2`  | **HTTPS** `https://localhost:8282`, **HTTP** `http://localhost:8283` (backchannel), management **`https://localhost:9292`** | `postgres_onprem_2` |
+| `cloud_idp` | **HTTPS** `https://localhost:8080`, management **`https://localhost:9090`** | `postgres_cloud_idp` |
+
+Run **`.\initial-setup.ps1`** once (accept UAC): it creates **`certs\keycloak-onprem-1.pfx`**, **`keycloak-onprem-2.pfx`**, **`keycloak-cloud-idp.pfx`**, and installs each into **LocalMachine\Trusted Root** so browsers and .NET trust the dev hostnames.
 
 Images:
 
@@ -23,15 +25,16 @@ Images:
 
 From the repository root:
 
-```bash
-docker compose up -d
-```
+1. **`.\initial-setup.ps1`** (Administrator) — generates the three PFX files and trusts them.
+2. **`docker compose up -d`**
 
 The first run can take a short while while each Postgres passes its health check and Keycloak creates its schema.
 
-Keycloak serves **`/health`**, **`/health/ready`**, etc. on the [**management interface**](https://www.keycloak.org/server/management-interface) (default **`KC_HTTP_MANAGEMENT_PORT=9000`**), not on the main HTTP port. This compose maps **9000** to the host as **9191** / **9292** / **9090** so you can open e.g. http://localhost:9191/health/ready for **onprem_1**. **`KC_HEALTH_ENABLED`** and **`KC_METRICS_ENABLED`** are set so those endpoints exist.
+Keycloak serves **`/health`**, **`/health/ready`**, etc. on the [**management interface**](https://www.keycloak.org/server/management-interface) (default **`KC_HTTP_MANAGEMENT_PORT=9000`**), not on the main public HTTPS port. This compose maps **9000** to the host as **9191** / **9292** / **9090**; with dev TLS enabled, use **`https://localhost:9191/health/ready`** (and the matching ports for the other instances). **`keycloak-setup.ps1`** waits on those HTTPS URLs.
 
-The **cloud** Keycloak service includes `extra_hosts: host.docker.internal:host-gateway` so it can reach on-prem Keycloak on the host during broker token/JWKS calls (used by `keycloak-setup.ps1`).
+On-prem instances also expose a second **HTTP** port (**8182** / **8283**) mapped to Keycloak’s internal **8080** so the **cloud** container can call token/JWKS/userinfo without JVM TLS trust setup; **`KC_HOSTNAME_URL`** keeps OIDC issuer URLs on the public **HTTPS** ports.
+
+The **cloud** Keycloak service includes `extra_hosts: host.docker.internal:host-gateway` for those backchannel calls.
 
 ## Organizations (cloud realm)
 
@@ -51,10 +54,10 @@ pwsh -File .\keycloak-setup.ps1
 
 This script (idempotent where possible):
 
-- Creates realm **`onprem`** on **onprem_1** and **onprem_2**, confidential OIDC client **`cloud-broker`** (per-instance secret), and users **`onprem1_user`** / **`onprem2_user`** (default passwords in the script synopsis).
+- Creates realm **`onprem`** on **onprem_1** and **onprem_2**, confidential OIDC client **`cloud-broker`** (per-instance secret), and users **`onprem1_user`** / **`onprem2_user`** with **email**, **first name**, and **last name** (defaults: `{username}@poc.local` and names parsed from the username; re-run fills missing profile fields on existing users). Passwords are in the script synopsis; optional overrides: **`User1Email`**, **`User1FirstName`**, **`User1LastName`** (and **`User2*`**).
 - Creates realm **`cloud`** on **cloud_idp**, OIDC identity providers **`onprem-1`** and **`onprem-2`**, a **username template** mapper so broker usernames look like `onprem-1.<preferred_username>`, and public OIDC client **`test-client`** (redirect `*` — POC only).
 
-Override defaults with script parameters (see `.SYNOPSIS` / `param` block in `keycloak-setup.ps1`). **Authorization** endpoints use `localhost` (browser); **token / JWKS / userinfo** use `host.docker.internal` from the cloud container.
+Override defaults with script parameters (see `.SYNOPSIS` / `param` block in `keycloak-setup.ps1`). **Authorization** uses **HTTPS** on `localhost`; **token / JWKS / userinfo** from the cloud container use **HTTP** `host.docker.internal` on **8182** / **8283**.
 
 ## Admin login
 
@@ -76,6 +79,7 @@ You can place a `.env` file next to `docker-compose.yml` to override defaults.
 | `POSTGRES_PASSWORD_CLOUD_IDP` | Same for `cloud_idp` (default: `keycloak_cloud_idp`) |
 | `KEYCLOAK_ADMIN` | Bootstrap admin username for **all three** Keycloak instances (default: `admin`) |
 | `KEYCLOAK_ADMIN_PASSWORD` | Bootstrap admin password for **all three** (default: `admin`) |
+| `KEYCLOAK_KEYSTORE_PASSWORD` | PKCS#12 password for mounted **`certs\keycloak-*.pfx`** (default: `password`; must match `initial-setup.ps1`) |
 
 ## Stop and reset
 
@@ -94,6 +98,7 @@ docker compose down -v
 ## Project structure
 
 - `docker-compose.yml` — three Keycloak + three Postgres services and named volumes.
+- `initial-setup.ps1` — dev TLS: three PFX files + machine **Trusted Root** (elevated).
 - `keycloak-setup.ps1` — provisions realms, IdPs, users, organizations, and clients (run from repo root).
 
 ## TestClient (MSAL + onprem_1 Keycloak)
@@ -104,6 +109,6 @@ The **`src/TestClient`** console app uses **Microsoft.Identity.Client** with **`
 2. From `src/TestClient`: `dotnet run`
 3. Complete login in the system browser (`onprem1_user` / `onprem1_password` by default).
 
-Defaults in code: authority `http://localhost:8181/realms/onprem`, client id `msal-onprem`, redirect `http://localhost`.
+Defaults in code: authority **`https://localhost:8181/realms/onprem`** (requires **`initial-setup.ps1`** trust), client id `msal-onprem`, redirect `http://localhost`.
 
 Other folders under `src/` (for example **CloudAPI**) have their own build and run instructions.

@@ -5,7 +5,8 @@
 
 .DESCRIPTION
   - On onprem_1 and onprem_2: realm "onprem", OIDC client "cloud-broker" for the cloud IdP,
-    and tenant users (onprem1_user / onprem2_user).
+    and tenant users (onprem1_user / onprem2_user) with email, first name, and last name
+    (defaults derived from username; optional overrides via User1*/User2* profile parameters).
   - On cloud_idp: realm "cloud", two OIDC identity providers (onprem-1, onprem-2) with
     username template "${ALIAS}.${CLAIM.preferred_username}", and a public "test-client"
     for interactive / MSAL-style OIDC from the host.
@@ -14,28 +15,28 @@
 
   Run from the repository root after: docker compose up -d
   Server must support the Organization feature (Keycloak 25+; enable in Admin if required).
-  Requires: PowerShell 7+ recommended (Invoke-RestMethod -SkipCertificateCheck not in 5.1;
-  this script uses HTTP only for local POC).
+  Requires: PowerShell 7+ recommended. Default bases use HTTPS on the host-trusted dev certs
+  from initial-setup.ps1; broker backchannel from the cloud container uses plain HTTP on
+  dedicated host ports (see docker-compose).
 
 .NOTES
-  Authorization URLs use localhost (browser). Token / JWKS / userinfo use host.docker.internal
-  so the cloud Keycloak container can reach on-prem Keycloak on the host (see docker-compose
-  extra_hosts on keycloak_cloud_idp).
+  Authorization URLs use HTTPS on localhost (browser / MSAL). Token / JWKS / userinfo from
+  the cloud container use http://host.docker.internal:<backchannel-port> (see parameters below).
 #>
 [CmdletBinding()]
 param(
-  [string] $OnPrem1PublicBase = "http://localhost:8181",
-  [string] $OnPrem2PublicBase = "http://localhost:8282",
-  [string] $CloudPublicBase = "http://localhost:8080",
+  [string] $OnPrem1PublicBase = "https://localhost:8181",
+  [string] $OnPrem2PublicBase = "https://localhost:8282",
+  [string] $CloudPublicBase = "https://localhost:8080",
 
-  # Management interface (KC_HTTP_MANAGEMENT_PORT); /health/* is here, not on the main port.
-  [string] $OnPrem1ManagementBase = "http://localhost:9191",
-  [string] $OnPrem2ManagementBase = "http://localhost:9292",
-  [string] $CloudManagementBase = "http://localhost:9090",
+  # Management interface (KC_HTTP_MANAGEMENT_PORT); /health/* is served here over HTTPS when TLS is enabled (same dev certs).
+  [string] $OnPrem1ManagementBase = "https://localhost:9191",
+  [string] $OnPrem2ManagementBase = "https://localhost:9292",
+  [string] $CloudManagementBase = "https://localhost:9090",
 
-  # Base URL the *cloud Keycloak container* uses to call on-prem token/jwks/userinfo endpoints.
-  [string] $OnPrem1DockerReachableBase = "http://host.docker.internal:8181",
-  [string] $OnPrem2DockerReachableBase = "http://host.docker.internal:8282",
+  # HTTP only: mapped to Keycloak's internal 8080 (docker-compose backchannel ports).
+  [string] $OnPrem1DockerReachableBase = "http://host.docker.internal:8182",
+  [string] $OnPrem2DockerReachableBase = "http://host.docker.internal:8283",
 
   [string] $OnPremRealm = "onprem",
   [string] $CloudRealm = "cloud",
@@ -63,6 +64,14 @@ param(
   [string] $User1Password = "onprem1_password",
   [string] $User2Name = "onprem2_user",
   [string] $User2Password = "onprem2_password",
+
+  # Optional profile fields (email, firstName, lastName). Omitted values are derived from the username.
+  [string] $User1Email = $null,
+  [string] $User1FirstName = $null,
+  [string] $User1LastName = $null,
+  [string] $User2Email = $null,
+  [string] $User2FirstName = $null,
+  [string] $User2LastName = $null,
 
   [string] $TestClientId = "test-client",
 
@@ -220,22 +229,95 @@ function New-MsalPublicClientIfMissing {
   Write-Host "  Created MSAL public client '$ClientId' (loopback redirects for interactive login)"
 }
 
+function Resolve-UserProfileFields {
+  param(
+    [string] $Username,
+    [string] $Email,
+    [string] $FirstName,
+    [string] $LastName
+  )
+  $ti = [System.Globalization.CultureInfo]::InvariantCulture.TextInfo
+  if ([string]::IsNullOrWhiteSpace($Email)) {
+    $Email = "$Username@poc.local"
+  }
+  $segments = @($Username -split '_' | Where-Object { $_ })
+  if ([string]::IsNullOrWhiteSpace($FirstName)) {
+    if ($segments.Count -ge 2) {
+      $FirstName = $ti.ToTitleCase($segments[0].ToLowerInvariant())
+    }
+    else {
+      $FirstName = $ti.ToTitleCase($Username.ToLowerInvariant())
+    }
+  }
+  if ([string]::IsNullOrWhiteSpace($LastName)) {
+    if ($segments.Count -ge 2) {
+      $rest = $segments[1..($segments.Count - 1)] -join ' '
+      $LastName = $ti.ToTitleCase($rest.ToLowerInvariant())
+    }
+    else {
+      $LastName = "User"
+    }
+  }
+  return @{
+    Email     = $Email
+    FirstName = $FirstName
+    LastName  = $LastName
+  }
+}
+
 function New-UserIfMissing {
   param(
     [string] $KeycloakBase,
     [string] $Token,
     [string] $Realm,
     [string] $Username,
-    [string] $Password
+    [string] $Password,
+    [string] $Email = $null,
+    [string] $FirstName = $null,
+    [string] $LastName = $null
   )
+  $profile = Resolve-UserProfileFields -Username $Username -Email $Email -FirstName $FirstName -LastName $LastName
+  $Email = $profile.Email
+  $FirstName = $profile.FirstName
+  $LastName = $profile.LastName
+
+  $headers = @{ Authorization = "Bearer $Token" }
   $search = Invoke-RestMethod -Method Get -Uri "$KeycloakBase/admin/realms/$Realm/users?username=$Username&exact=true" `
-    -Headers @{ Authorization = "Bearer $Token" }
+    -Headers $headers
   if ($search -and $search.Count -gt 0) {
-    Write-Host "  User '$Username' already exists in $Realm"
+    $userId = $search[0].id
+    $uri = "$KeycloakBase/admin/realms/$Realm/users/$userId"
+    $rep = Invoke-RestMethod -Method Get -Uri $uri -Headers $headers
+    $dirty = $false
+    if ([string]::IsNullOrWhiteSpace($rep.email)) {
+      $rep.email = $Email
+      $dirty = $true
+    }
+    if ([string]::IsNullOrWhiteSpace($rep.firstName)) {
+      $rep.firstName = $FirstName
+      $dirty = $true
+    }
+    if ([string]::IsNullOrWhiteSpace($rep.lastName)) {
+      $rep.lastName = $LastName
+      $dirty = $true
+    }
+    if ($dirty) {
+      $rep.emailVerified = $true
+      $json = $rep | ConvertTo-Json -Depth 10
+      Invoke-RestMethod -Method Put -Uri $uri -Headers $headers -Body $json -ContentType "application/json"
+      Write-Host "  Updated profile for existing user '$Username' in $Realm ($FirstName $LastName, $Email)"
+    }
+    else {
+      Write-Host "  User '$Username' already exists in $Realm"
+    }
     return
   }
+
   $user = @{
     username      = $Username
+    email         = $Email
+    firstName     = $FirstName
+    lastName      = $LastName
     enabled       = $true
     emailVerified = $true
     credentials   = @(
@@ -243,7 +325,7 @@ function New-UserIfMissing {
     )
   }
   Invoke-KeycloakAdmin -Method Post -KeycloakBase $KeycloakBase -Path "/realms/$Realm/users" -Token $Token -Body $user
-  Write-Host "  Created user '$Username' in $Realm"
+  Write-Host "  Created user '$Username' in $Realm ($FirstName $LastName, $Email)"
 }
 
 function Get-IdpAliasList {
@@ -546,7 +628,8 @@ $brokerRedirect1 = "$CloudPublicBase/realms/$CloudRealm/broker/$IdpAlias1/endpoi
 New-BrokerClientIfMissing -KeycloakBase $OnPrem1PublicBase -Token $token1 -Realm $OnPremRealm `
   -ClientId $BrokerClientId -Secret $BrokerSecretOnPrem1 -RedirectUris @($brokerRedirect1)
 New-UserIfMissing -KeycloakBase $OnPrem1PublicBase -Token $token1 -Realm $OnPremRealm `
-  -Username $User1Name -Password $User1Password
+  -Username $User1Name -Password $User1Password `
+  -Email $User1Email -FirstName $User1FirstName -LastName $User1LastName
 New-MsalPublicClientIfMissing -KeycloakBase $OnPrem1PublicBase -Token $token1 -Realm $OnPremRealm -ClientId $MsalOnPremClientId
 
 Write-Host "`n=== On-prem 2 ($OnPrem2PublicBase) ==="
@@ -555,7 +638,8 @@ $brokerRedirect2 = "$CloudPublicBase/realms/$CloudRealm/broker/$IdpAlias2/endpoi
 New-BrokerClientIfMissing -KeycloakBase $OnPrem2PublicBase -Token $token2 -Realm $OnPremRealm `
   -ClientId $BrokerClientId -Secret $BrokerSecretOnPrem2 -RedirectUris @($brokerRedirect2)
 New-UserIfMissing -KeycloakBase $OnPrem2PublicBase -Token $token2 -Realm $OnPremRealm `
-  -Username $User2Name -Password $User2Password
+  -Username $User2Name -Password $User2Password `
+  -Email $User2Email -FirstName $User2FirstName -LastName $User2LastName
 New-MsalPublicClientIfMissing -KeycloakBase $OnPrem2PublicBase -Token $token2 -Realm $OnPremRealm -ClientId $MsalOnPremClientId
 
 Write-Host "`n=== Cloud ($CloudPublicBase) realm '$CloudRealm' ==="
