@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="CloudAPI/CloudAPI.csproj" />
+  <Project Path="TestClient/TestClient.csproj" />
+</Solution>

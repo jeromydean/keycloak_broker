@@ -1,0 +1,13 @@
+@CloudAPI_HostAddress = http://localhost:5109
+@access_token = REPLACE_WITH_ACCESS_TOKEN
+
+### Health (anonymous)
+GET {{CloudAPI_HostAddress}}/health
+Accept: application/json
+
+### Who am I (requires Bearer token from cloud_idp)
+GET {{CloudAPI_HostAddress}}/api/whoami
+Authorization: Bearer {{access_token}}
+Accept: application/json
+
+###

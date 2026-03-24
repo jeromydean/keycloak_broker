@@ -1,0 +1,111 @@
+# POC: three Keycloak realms stacks (each with its own Postgres).
+# Usage: docker compose up -d
+#
+# URLs (after start):
+#   onprem_1:  http://localhost:8181
+#   onprem_2:  http://localhost:8282
+#   cloud_idp: http://localhost:8080
+#
+# Default admin (each instance): admin / admin
+
+services:
+  postgres_onprem_1:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: keycloak
+      POSTGRES_USER: keycloak
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD_ONPREM_1:-keycloak_onprem_1}
+    volumes:
+      - pg_onprem_1:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U keycloak -d keycloak"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  keycloak_onprem_1:
+    image: quay.io/keycloak/keycloak:26.0.5
+    command: start-dev
+    environment:
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://postgres_onprem_1:5432/keycloak
+      KC_DB_USERNAME: keycloak
+      KC_DB_PASSWORD: ${POSTGRES_PASSWORD_ONPREM_1:-keycloak_onprem_1}
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KEYCLOAK_ADMIN:-admin}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:-admin}
+      KC_HOSTNAME_STRICT: "false"
+      KC_HTTP_ENABLED: "true"
+    ports:
+      - "8181:8080"
+    depends_on:
+      postgres_onprem_1:
+        condition: service_healthy
+
+  postgres_onprem_2:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: keycloak
+      POSTGRES_USER: keycloak
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD_ONPREM_2:-keycloak_onprem_2}
+    volumes:
+      - pg_onprem_2:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U keycloak -d keycloak"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  keycloak_onprem_2:
+    image: quay.io/keycloak/keycloak:26.0.5
+    command: start-dev
+    environment:
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://postgres_onprem_2:5432/keycloak
+      KC_DB_USERNAME: keycloak
+      KC_DB_PASSWORD: ${POSTGRES_PASSWORD_ONPREM_2:-keycloak_onprem_2}
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KEYCLOAK_ADMIN:-admin}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:-admin}
+      KC_HOSTNAME_STRICT: "false"
+      KC_HTTP_ENABLED: "true"
+    ports:
+      - "8282:8080"
+    depends_on:
+      postgres_onprem_2:
+        condition: service_healthy
+
+  postgres_cloud_idp:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: keycloak
+      POSTGRES_USER: keycloak
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD_CLOUD_IDP:-keycloak_cloud_idp}
+    volumes:
+      - pg_cloud_idp:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U keycloak -d keycloak"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  keycloak_cloud_idp:
+    image: quay.io/keycloak/keycloak:26.0.5
+    command: start-dev
+    environment:
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://postgres_cloud_idp:5432/keycloak
+      KC_DB_USERNAME: keycloak
+      KC_DB_PASSWORD: ${POSTGRES_PASSWORD_CLOUD_IDP:-keycloak_cloud_idp}
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KEYCLOAK_ADMIN:-admin}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:-admin}
+      KC_HOSTNAME_STRICT: "false"
+      KC_HTTP_ENABLED: "true"
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres_cloud_idp:
+        condition: service_healthy
+
+volumes:
+  pg_onprem_1:
+  pg_onprem_2:
+  pg_cloud_idp:
