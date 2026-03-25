@@ -1,8 +1,8 @@
-# Keycloak broker POC
+# 🔐 Keycloak broker POC
 
 This repository includes a Docker Compose stack for a proof of concept with **three separate Keycloak servers**, each backed by its **own PostgreSQL** instance and persistent volume.
 
-## Layout
+## 📋 Layout
 
 | Instance    | Keycloak URL | Postgres service |
 |-------------|--------------|------------------|
@@ -12,21 +12,21 @@ This repository includes a Docker Compose stack for a proof of concept with **th
 
 Run **`.\initial-setup.ps1`** once (accept UAC): it creates **`certs\keycloak-onprem-1.pfx`**, **`keycloak-onprem-2.pfx`**, **`keycloak-cloud-idp.pfx`**, and installs each into **LocalMachine\Trusted Root** so browsers and .NET trust the dev hostnames.
 
-Images:
+**Images**
 
 - Keycloak: `quay.io/keycloak/keycloak:26.0.5` (`start-dev`)
 - PostgreSQL: `postgres:16-alpine`
 
-## Prerequisites
+## ✅ Prerequisites
 
-- [Docker](https://docs.docker.com/get-docker/) with Compose v2 (`docker compose`)
+- [Docker](https://docs.docker.com/get-docker/) or [Podman](https://podman.io/) with Compose v2 (`docker compose` / `podman compose`)
 
-## Start
+## 🚀 Start
 
 From the repository root:
 
 1. **`.\initial-setup.ps1`** (Administrator) — generates the three PFX files and trusts them.
-2. **`docker compose up -d`**
+2. **`docker compose up -d`** (or **`podman compose up -d`**)
 
 The first run can take a short while while each Postgres passes its health check and Keycloak creates its schema.
 
@@ -36,7 +36,7 @@ On-prem instances also expose a second **HTTP** port (**8182** / **8283**) mappe
 
 The **cloud** Keycloak service includes `extra_hosts: host.docker.internal:host-gateway` for those backchannel calls.
 
-## Organizations (cloud realm)
+## 🏢 Organizations (cloud realm)
 
 **`keycloak-setup.ps1`** turns on **`organizationsEnabled`** on the **`cloud`** realm, creates organizations **`org1`** and **`org2`**, and **links** identity providers **`onprem-1`** and **`onprem-2`** to them so each IdP appears under **Organization → Identity providers** in the admin UI (not only under realm **Identity providers**). Re-run the script if linking was skipped earlier (older script versions resolved org IDs using the wrong search API).
 
@@ -44,7 +44,7 @@ The **cloud** Keycloak service includes `extra_hosts: host.docker.internal:host-
 
 Override names via script parameters: **`Org1Alias`**, **`Org2Alias`**, **`Org1DisplayName`**, **`Org2DisplayName`**. Keycloak requires at least one **domain** per organization; defaults are **`Org1DomainName=org1.poc.local`** and **`Org2DomainName=org2.poc.local`** (change to real customer domains in production).
 
-## Keycloak provisioning (realms, IdPs, users)
+## ⚙️ Keycloak provisioning (realms, IdPs, users)
 
 After the stack is healthy, run (from any directory; use a full path if needed):
 
@@ -55,11 +55,13 @@ pwsh -File .\keycloak-setup.ps1
 This script (idempotent where possible):
 
 - Creates realm **`onprem`** on **onprem_1** and **onprem_2**, confidential OIDC client **`cloud-broker`** (per-instance secret), and users **`onprem1_user`** / **`onprem2_user`** with **email**, **first name**, and **last name** (defaults: `{username}@poc.local` and names parsed from the username; re-run fills missing profile fields on existing users). Passwords are in the script synopsis; optional overrides: **`User1Email`**, **`User1FirstName`**, **`User1LastName`** (and **`User2*`**).
-- Creates realm **`cloud`** on **cloud_idp**, OIDC identity providers **`onprem-1`** and **`onprem-2`**, a **username template** mapper so broker usernames look like `onprem-1.<preferred_username>`, and public OIDC client **`test-client`** (redirect `*` — POC only).
+- Creates realm **`cloud`** on **cloud_idp**, OIDC identity providers **`onprem-1`** and **`onprem-2`**, an **OIDC username template** mapper (**`oidc-username-idp-mapper`**) so broker usernames look like `onprem-1.<preferred_username>`, public OIDC client **`test-client`** (redirect `*` — POC only), and confidential **`cloudservices`** with an audience mapper so tokens work with CloudAPI.
 
-Override defaults with script parameters (see `.SYNOPSIS` / `param` block in `keycloak-setup.ps1`). **Authorization** uses **HTTPS** on `localhost`; **token / JWKS / userinfo** from the cloud container use **HTTP** `host.docker.internal` on **8182** / **8283**. The broker IdP **issuer** matches the **public** on-prem URL ( **`iss`** follows **`KC_HOSTNAME_URL`** ). **Userinfo** is disabled on the broker IdP (`disableUserInfo`): calling userinfo on `http://host.docker.internal:8182` with an access token whose `iss` is `https://localhost:8181/...` makes on-prem return **invalid_token**. Re-run **`keycloak-setup.ps1`** to sync existing IdPs.
+Override defaults with script parameters (see `.SYNOPSIS` / `param` block in `keycloak-setup.ps1`). **Authorization** uses **HTTPS** on `localhost`; **token / JWKS** from the cloud container use **HTTP** `host.docker.internal` on **8182** / **8283**. The broker IdP **issuer** matches the **public** on-prem URL ( **`iss`** follows **`KC_HOSTNAME_URL`** ).
 
-## Admin login
+**Userinfo on the broker IdP is disabled** (`disableUserInfo=true`): calling userinfo on `http://host.docker.internal:8182` with an access token whose `iss` is `https://localhost:8181/...` makes on-prem return **invalid_token**. Re-run **`keycloak-setup.ps1`** to sync issuer, `disableUserInfo`, and mappers on existing IdPs.
+
+## 🔑 Admin login
 
 Each Keycloak instance uses the same bootstrap credentials unless you override them (see below):
 
@@ -68,7 +70,7 @@ Each Keycloak instance uses the same bootstrap credentials unless you override t
 
 Bootstrap admin is created on **first start** when the realm data does not yet exist.
 
-## Environment variables
+## 🌍 Environment variables
 
 You can place a `.env` file next to `docker-compose.yml` to override defaults.
 
@@ -81,7 +83,7 @@ You can place a `.env` file next to `docker-compose.yml` to override defaults.
 | `KEYCLOAK_ADMIN_PASSWORD` | Bootstrap admin password for **all three** (default: `admin`) |
 | `KEYCLOAK_KEYSTORE_PASSWORD` | PKCS#12 password for mounted **`certs\keycloak-*.pfx`** (default: `password`; must match `initial-setup.ps1`) |
 
-## Stop and reset
+## ⏹️ Stop and reset
 
 Stop containers without removing volumes:
 
@@ -95,13 +97,13 @@ Stop and **delete** Postgres data (full reset of all three stacks):
 docker compose down -v
 ```
 
-## Project structure
+## 📁 Project structure
 
 - `docker-compose.yml` — three Keycloak + three Postgres services and named volumes.
 - `initial-setup.ps1` — dev TLS: three PFX files + machine **Trusted Root** (elevated).
 - `keycloak-setup.ps1` — provisions realms, IdPs, users, organizations, and clients (run from repo root).
 
-## CloudAPI (JWT from cloud realm)
+## ☁️ CloudAPI (JWT from cloud realm)
 
 **`src/CloudAPI`** validates **Bearer** tokens issued by **`https://localhost:8080/realms/cloud`** (same realm the broker uses). Run it on a fixed port for the POC:
 
@@ -112,7 +114,7 @@ dotnet run --launch-profile http
 
 Default URL: **`http://localhost:5300`** (`/health` anonymous, **`/api/whoami`** requires a valid cloud access token whose **`aud`** includes **`cloudservices`** — provisioned by **`keycloak-setup.ps1`** via an audience mapper on **`test-client`**).
 
-## TestClient (MSAL + cloud broker → on-prem)
+## 🧪 TestClient (MSAL + cloud broker → on-prem)
 
 The **`src/TestClient`** app signs in against the **cloud** realm with public client **`test-client`**. At Keycloak’s login UI, choose an identity provider (**`onprem-1`** or **`onprem-2`**), then sign in with the matching on-prem user (e.g. **`onprem1_user`** / **`onprem1_password`**). The **access token is issued by the cloud realm** (broker flow); it is **not** the raw on-prem token.
 
@@ -125,3 +127,13 @@ After sign-in, TestClient calls **`http://localhost:5300/api/whoami`** on CloudA
 Uses **Microsoft.Identity.Client** **`WithOidcAuthority`** ([generic OIDC](https://github.com/AzureAD/microsoft-authentication-library-for-dotnet/pull/4653)). Requires TLS trust from **`initial-setup.ps1`** for `https://localhost:8080` and `8181`.
 
 To sign in **directly** to on-prem only (no broker), use client **`msal-onprem`** and authority **`https://localhost:8181/realms/onprem`** in your own code; CloudAPI in this repo is configured for **cloud** tokens.
+
+## 🔧 Troubleshooting
+
+| Symptom | What to check |
+|---------|----------------|
+| **Broker login fails** after IdP redirect; cloud log shows `NullPointerException` / `IdentityProviderMapper.preprocessFederatedIdentity` / **`target` is null** | The cloud IdP mapper must be type **`oidc-username-idp-mapper`** (OIDC “username template” mapper), not a legacy **`username-template-importer`** string. Re-run **`keycloak-setup.ps1`** — it replaces an outdated **`username-template-tenant`** mapper with the correct type and **`syncMode: INHERIT`**. |
+| **`invalid_token`** / userinfo errors on on-prem when cloud broker runs | Keep broker IdP **`disableUserInfo=true`** and issuer aligned with public HTTPS (`KC_HOSTNAME_URL`). Re-run **`keycloak-setup.ps1`** to sync. |
+| **`iss` / issuer mismatch** in tokens or validation errors | Broker IdP issuer should be the **same base URL** the browser uses for on-prem (e.g. `https://localhost:8181/...`), not the HTTP backchannel host. |
+| **Script errors** under PowerShell strict mode | Prefer **`pwsh`** for **`keycloak-setup.ps1`**. If you use strict mode globally, the script avoids unsafe property access on optional API fields. |
+| **Where to read errors** | Use container logs for the **cloud** Keycloak service (e.g. `docker compose logs -f keycloak_cloud_idp` or the equivalent **`podman`** command). The admin UI often does not show full broker stack traces. |
