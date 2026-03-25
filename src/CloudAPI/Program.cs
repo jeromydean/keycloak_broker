@@ -14,9 +14,9 @@ namespace CloudAPI
 
       IConfigurationSection jwtSection = builder.Configuration.GetSection("Authentication:JwtBearer");
       string authority = jwtSection["Authority"]
-          ?? throw new InvalidOperationException("Configuration 'Authentication:JwtBearer:Authority' is required (Keycloak realm URL, e.g. http://localhost:8080/realms/master).");
+          ?? throw new InvalidOperationException("Configuration 'Authentication:JwtBearer:Authority' is required (Keycloak realm URL, e.g. https://localhost:8080/realms/cloud).");
       string? audience = jwtSection["Audience"];
-      bool requireHttpsMetadata = jwtSection.GetValue("RequireHttpsMetadata", false);
+      bool requireHttpsMetadata = jwtSection.GetValue("RequireHttpsMetadata", true);
 
       builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
           .AddJwtBearer(options =>

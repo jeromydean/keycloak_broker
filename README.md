@@ -57,7 +57,7 @@ This script (idempotent where possible):
 - Creates realm **`onprem`** on **onprem_1** and **onprem_2**, confidential OIDC client **`cloud-broker`** (per-instance secret), and users **`onprem1_user`** / **`onprem2_user`** with **email**, **first name**, and **last name** (defaults: `{username}@poc.local` and names parsed from the username; re-run fills missing profile fields on existing users). Passwords are in the script synopsis; optional overrides: **`User1Email`**, **`User1FirstName`**, **`User1LastName`** (and **`User2*`**).
 - Creates realm **`cloud`** on **cloud_idp**, OIDC identity providers **`onprem-1`** and **`onprem-2`**, a **username template** mapper so broker usernames look like `onprem-1.<preferred_username>`, and public OIDC client **`test-client`** (redirect `*` — POC only).
 
-Override defaults with script parameters (see `.SYNOPSIS` / `param` block in `keycloak-setup.ps1`). **Authorization** uses **HTTPS** on `localhost`; **token / JWKS / userinfo** from the cloud container use **HTTP** `host.docker.internal` on **8182** / **8283**.
+Override defaults with script parameters (see `.SYNOPSIS` / `param` block in `keycloak-setup.ps1`). **Authorization** uses **HTTPS** on `localhost`; **token / JWKS / userinfo** from the cloud container use **HTTP** `host.docker.internal` on **8182** / **8283**. The broker IdP **issuer** matches the **public** on-prem URL ( **`iss`** follows **`KC_HOSTNAME_URL`** ). **Userinfo** is disabled on the broker IdP (`disableUserInfo`): calling userinfo on `http://host.docker.internal:8182` with an access token whose `iss` is `https://localhost:8181/...` makes on-prem return **invalid_token**. Re-run **`keycloak-setup.ps1`** to sync existing IdPs.
 
 ## Admin login
 
@@ -101,14 +101,27 @@ docker compose down -v
 - `initial-setup.ps1` — dev TLS: three PFX files + machine **Trusted Root** (elevated).
 - `keycloak-setup.ps1` — provisions realms, IdPs, users, organizations, and clients (run from repo root).
 
-## TestClient (MSAL + onprem_1 Keycloak)
+## CloudAPI (JWT from cloud realm)
 
-The **`src/TestClient`** console app uses **Microsoft.Identity.Client** with **`WithExperimentalFeatures(true)`** and **`WithOidcAuthority(...)`** so MSAL treats **Keycloak** as a generic OIDC provider (see [MSAL generic OIDC](https://github.com/AzureAD/microsoft-authentication-library-for-dotnet/pull/4653)).
+**`src/CloudAPI`** validates **Bearer** tokens issued by **`https://localhost:8080/realms/cloud`** (same realm the broker uses). Run it on a fixed port for the POC:
 
-1. Run **`keycloak-setup.ps1`** from the repo root (creates realm **`onprem`**, user **`onprem1_user`**, and public client **`msal-onprem`** with redirects `http://localhost` and `http://127.0.0.1`).
-2. From `src/TestClient`: `dotnet run`
-3. Complete login in the system browser (`onprem1_user` / `onprem1_password` by default).
+```bash
+cd src/CloudAPI
+dotnet run --launch-profile http
+```
 
-Defaults in code: authority **`https://localhost:8181/realms/onprem`** (requires **`initial-setup.ps1`** trust), client id `msal-onprem`, redirect `http://localhost`.
+Default URL: **`http://localhost:5300`** (`/health` anonymous, **`/api/whoami`** requires a valid cloud access token whose **`aud`** includes **`cloudservices`** — provisioned by **`keycloak-setup.ps1`** via an audience mapper on **`test-client`**).
 
-Other folders under `src/` (for example **CloudAPI**) have their own build and run instructions.
+## TestClient (MSAL + cloud broker → on-prem)
+
+The **`src/TestClient`** app signs in against the **cloud** realm with public client **`test-client`**. At Keycloak’s login UI, choose an identity provider (**`onprem-1`** or **`onprem-2`**), then sign in with the matching on-prem user (e.g. **`onprem1_user`** / **`onprem1_password`**). The **access token is issued by the cloud realm** (broker flow); it is **not** the raw on-prem token.
+
+After sign-in, TestClient calls **`http://localhost:5300/api/whoami`** on CloudAPI.
+
+1. Stack up + **`keycloak-setup.ps1`** (realm **`cloud`**, IdPs **`onprem-1`** / **`onprem-2`**, client **`test-client`**).
+2. Start **CloudAPI** (`dotnet run --launch-profile http` in `src/CloudAPI`).
+3. From **`src/TestClient`**: `dotnet run` (Keycloak shows **onprem-1** / **onprem-2**), or pin a broker tenant: **`dotnet run -- onprem_1`** / **`dotnet run -- onprem_2`** (sends Keycloak **`kc_idp_hint`** so the matching IdP alias is used—underscores are mapped to hyphens, e.g. `onprem_1` → `onprem-1`).
+
+Uses **Microsoft.Identity.Client** **`WithOidcAuthority`** ([generic OIDC](https://github.com/AzureAD/microsoft-authentication-library-for-dotnet/pull/4653)). Requires TLS trust from **`initial-setup.ps1`** for `https://localhost:8080` and `8181`.
+
+To sign in **directly** to on-prem only (no broker), use client **`msal-onprem`** and authority **`https://localhost:8181/realms/onprem`** in your own code; CloudAPI in this repo is configured for **cloud** tokens.

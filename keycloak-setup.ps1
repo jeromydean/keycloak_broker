@@ -8,8 +8,10 @@
     and tenant users (onprem1_user / onprem2_user) with email, first name, and last name
     (defaults derived from username; optional overrides via User1*/User2* profile parameters).
   - On cloud_idp: realm "cloud", two OIDC identity providers (onprem-1, onprem-2) with
-    username template "${ALIAS}.${CLAIM.preferred_username}", and a public "test-client"
-    for interactive / MSAL-style OIDC from the host.
+    OIDC username template mapper (oidc-username-idp-mapper) for username pattern
+    '${ALIAS}.${CLAIM.preferred_username}', public "test-client", and a
+    confidential "cloudservices" client plus OIDC audience mapper so access tokens include
+    aud=cloudservices for CloudAPI.
   - On cloud realm: Keycloak Organizations enabled; organizations org1 / org2 linked to IdPs
     onprem-1 and onprem-2 (linked organization in admin UI).
 
@@ -22,6 +24,11 @@
 .NOTES
   Authorization URLs use HTTPS on localhost (browser / MSAL). Token / JWKS / userinfo from
   the cloud container use http://host.docker.internal:<backchannel-port> (see parameters below).
+
+  Broker IdP "issuer" must match id_token "iss" (public URL when KC_HOSTNAME_URL is set on on-prem).
+  Userinfo must not be called on the HTTP backchannel host with those tokens — on-prem rejects
+  access tokens whose iss is the public URL when the request hits host.docker.internal. Set
+  disableUserInfo=true so the broker uses the id_token only (POC default).
 #>
 [CmdletBinding()]
 param(
@@ -74,6 +81,10 @@ param(
   [string] $User2LastName = $null,
 
   [string] $TestClientId = "test-client",
+
+  # Confidential "phantom" client: exists so access tokens from $TestClientId can include aud = this client id (CloudAPI validates it).
+  [string] $CloudApiAudienceClientId = "cloudservices",
+  [string] $CloudApiAudienceClientSecret = "cloudservices-poc-secret",
 
   # Public client on each onprem realm for MSAL (interactive / system browser); redirect matches TestClient RedirectUri.
   [string] $MsalOnPremClientId = "msal-onprem",
@@ -353,6 +364,7 @@ function New-OidcIdentityProviderIfMissing {
     }
   }
 
+  # Must match id_token "iss" (with KC_HOSTNAME_URL on on-prem, iss is the public URL, not the backchannel host).
   $issuer = "$AuthBasePublic/realms/$OnPremRealm"
   $config = @{
     clientId                           = $ClientId
@@ -369,7 +381,8 @@ function New-OidcIdentityProviderIfMissing {
     syncMode                           = "IMPORT"
     hideOnLoginPage                    = "false"
     backchannelSupported               = "false"
-    disableUserInfo                    = "false"
+    # Userinfo on http://host.docker.internal:8182 rejects tokens with iss=https://localhost:8181/...
+    disableUserInfo                    = "true"
     passMaxAge                         = "false"
     uiLocales                          = "false"
     pkceEnabled                        = "true"
@@ -389,33 +402,95 @@ function New-OidcIdentityProviderIfMissing {
   }
 
   Invoke-KeycloakAdmin -Method Post -KeycloakBase $CloudBase -Path "/realms/$Realm/identity-provider/instances" -Token $Token -Body $idp
-  Write-Host "  Created OIDC IdP '$Alias' -> $issuer"
+  Write-Host "  Created OIDC IdP '$Alias' (auth $AuthBasePublic, issuer for validation $issuer)"
 }
 
-function New-UsernameTemplateMapperIfMissing {
+function Sync-OidcBrokerIdentityProviderIssuer {
+  param(
+    [string] $CloudBase,
+    [string] $Token,
+    [string] $Realm,
+    [string] $Alias,
+    [string] $PublicBase,
+    [string] $IdentityRealmName
+  )
+  $headers = @{ Authorization = "Bearer $Token" }
+  $uri = "$CloudBase/admin/realms/$Realm/identity-provider/instances/$Alias"
+  try {
+    $idp = Invoke-RestMethod -Method Get -Uri $uri -Headers $headers -ErrorAction Stop
+  }
+  catch {
+    Write-Warning "Cannot sync broker IdP '${Alias}': $_"
+    return
+  }
+  $expectedIss = "$PublicBase/realms/$IdentityRealmName"
+  $dirty = $false
+  if ($idp.config.issuer -ne $expectedIss) {
+    $idp.config.issuer = $expectedIss
+    $dirty = $true
+  }
+  $disableUi = [string]$idp.config.disableUserInfo
+  if ($disableUi -ne "true") {
+    $idp.config.disableUserInfo = "true"
+    $dirty = $true
+  }
+  if (-not $dirty) {
+    Write-Host "  IdP '$Alias' broker settings ok (issuer + disableUserInfo)"
+    return
+  }
+  $json = $idp | ConvertTo-Json -Depth 25
+  Invoke-RestMethod -Method Put -Uri $uri -Headers $headers -Body $json -ContentType "application/json"
+  Write-Host "  Synced IdP '$Alias': issuer=$expectedIss, disableUserInfo=true (avoid userinfo issuer mismatch on backchannel)"
+}
+
+function Sync-UsernameTemplateMapperForBrokerIdentityProvider {
   param(
     [string] $CloudBase,
     [string] $Token,
     [string] $Realm,
     [string] $IdpAlias
   )
-  $mappers = Invoke-KeycloakAdmin -Method Get -KeycloakBase $CloudBase `
-    -Path "/realms/$Realm/identity-provider/instances/$IdpAlias/mappers" -Token $Token
-  foreach ($m in $mappers) {
-    if ($m.name -eq "username-template-tenant") { return }
+  $basePath = "/realms/$Realm/identity-provider/instances/$IdpAlias/mappers"
+  $mappers = Invoke-KeycloakAdmin -Method Get -KeycloakBase $CloudBase -Path $basePath -Token $Token
+  if ($null -ne $mappers) {
+    if ($mappers -isnot [System.Array]) {
+      $mappers = @($mappers)
+    }
+    foreach ($m in $mappers) {
+      if ($m.name -ne "username-template-tenant") {
+        continue
+      }
+      $wrongType = $m.identityProviderMapper -ne "oidc-username-idp-mapper"
+      $sync = $null
+      if ($null -ne $m.config) {
+        if ($m.config -is [hashtable]) {
+          if ($m.config.ContainsKey('syncMode')) { $sync = $m.config['syncMode'] }
+        }
+        else {
+          $syncProp = $m.config.PSObject.Properties['syncMode']
+          if ($null -ne $syncProp) { $sync = $syncProp.Value }
+        }
+      }
+      if (-not $wrongType -and $sync -eq "INHERIT") {
+        Write-Host "  Username template mapper on '$IdpAlias' already correct (oidc-username-idp-mapper)"
+        return
+      }
+      Invoke-KeycloakAdmin -Method Delete -KeycloakBase $CloudBase -Path "$basePath/$($m.id)" -Token $Token
+      Write-Host "  Removed outdated username mapper on '$IdpAlias' (was: $($m.identityProviderMapper); need oidc-username-idp-mapper + syncMode)"
+    }
   }
 
   $mapper = @{
     name                         = "username-template-tenant"
     identityProviderAlias        = $IdpAlias
-    identityProviderMapper       = "username-template-importer"
+    identityProviderMapper       = "oidc-username-idp-mapper"
     config                       = @{
       template = '${ALIAS}.${CLAIM.preferred_username}'
+      syncMode = "INHERIT"
     }
   }
-  Invoke-KeycloakAdmin -Method Post -KeycloakBase $CloudBase `
-    -Path "/realms/$Realm/identity-provider/instances/$IdpAlias/mappers" -Token $Token -Body $mapper
-  Write-Host "  Added username template mapper on IdP '$IdpAlias'"
+  Invoke-KeycloakAdmin -Method Post -KeycloakBase $CloudBase -Path $basePath -Token $Token -Body $mapper
+  Write-Host "  Ensured username template mapper on IdP '$IdpAlias' (oidc-username-idp-mapper; fixes null mapper / NPE in broker callback)"
 }
 
 function New-TestClientIfMissing {
@@ -438,6 +513,81 @@ function New-TestClientIfMissing {
   }
   Invoke-KeycloakAdmin -Method Post -KeycloakBase $CloudBase -Path "/realms/$Realm/clients" -Token $Token -Body $client
   Write-Host "  Created public client '$ClientId' (redirect URIs: * - POC only)"
+}
+
+function New-CloudApiAudienceClientIfMissing {
+  param(
+    [string] $CloudBase,
+    [string] $Token,
+    [string] $Realm,
+    [string] $ClientId,
+    [string] $Secret
+  )
+  $existing = Get-ClientUuid -KeycloakBase $CloudBase -Token $Token -Realm $Realm -ClientId $ClientId
+  if ($existing) {
+    Write-Host "  API audience client '$ClientId' already exists in $Realm"
+    return
+  }
+  $client = @{
+    clientId                    = $ClientId
+    name                        = "POC CloudAPI JWT audience (resource identifier)"
+    enabled                     = $true
+    protocol                    = "openid-connect"
+    publicClient                = $false
+    secret                      = $Secret
+    standardFlowEnabled         = $false
+    directAccessGrantsEnabled   = $false
+    serviceAccountsEnabled      = $false
+    implicitFlowEnabled         = $false
+    webOrigins                  = @()
+    # Keycloak rejects empty redirect URIs for some client types; this client is not used for browser login.
+    redirectUris                = @("http://127.0.0.1/dummy-audience-client-not-used")
+  }
+  Invoke-KeycloakAdmin -Method Post -KeycloakBase $CloudBase -Path "/realms/$Realm/clients" -Token $Token -Body $client
+  Write-Host "  Created audience client '$ClientId' (tokens reference aud; not used for end-user login)"
+}
+
+function Add-OidcAudienceMapperToClientIfMissing {
+  param(
+    [string] $CloudBase,
+    [string] $Token,
+    [string] $Realm,
+    [string] $SourceClientId,
+    [string] $AudienceClientId,
+    [string] $MapperName = "audience-cloudservices-api"
+  )
+  $cid = Get-ClientUuid -KeycloakBase $CloudBase -Token $Token -Realm $Realm -ClientId $SourceClientId
+  if (-not $cid) {
+    throw "Client '$SourceClientId' not found; cannot add OIDC audience mapper"
+  }
+  $mappers = Invoke-KeycloakAdmin -Method Get -KeycloakBase $CloudBase `
+    -Path "/realms/$Realm/clients/$cid/protocol-mappers/models" -Token $Token
+  if ($null -eq $mappers) {
+    $mappers = @()
+  }
+  elseif ($mappers -isnot [System.Array]) {
+    $mappers = @($mappers)
+  }
+  foreach ($m in $mappers) {
+    if ($m.name -eq $MapperName) {
+      Write-Host "  OIDC audience mapper '$MapperName' already on client '$SourceClientId'"
+      return
+    }
+  }
+  $mapper = @{
+    name           = $MapperName
+    protocol       = "openid-connect"
+    protocolMapper = "oidc-audience-mapper"
+    config         = @{
+      "included.client.audience"   = $AudienceClientId
+      "id.token.claim"             = "false"
+      "access.token.claim"         = "true"
+      "introspection.token.claim"  = "true"
+    }
+  }
+  Invoke-KeycloakAdmin -Method Post -KeycloakBase $CloudBase `
+    -Path "/realms/$Realm/clients/$cid/protocol-mappers/models" -Token $Token -Body $mapper
+  Write-Host "  Mapped access-token audience on '$SourceClientId' -> '$AudienceClientId' (JWT aud for CloudAPI)"
 }
 
 function Enable-RealmOrganizationsIfNeeded {
@@ -671,8 +821,13 @@ New-OidcIdentityProviderIfMissing -CloudBase $CloudPublicBase -Token $tokenCloud
   -Alias $IdpAlias2 -DisplayName "Customer On-Prem 2" -ClientId $BrokerClientId -ClientSecret $BrokerSecretOnPrem2 `
   -AuthBasePublic $OnPrem2PublicBase -BackchannelBase $OnPrem2DockerReachableBase
 
-New-UsernameTemplateMapperIfMissing -CloudBase $CloudPublicBase -Token $tokenCloud -Realm $CloudRealm -IdpAlias $IdpAlias1
-New-UsernameTemplateMapperIfMissing -CloudBase $CloudPublicBase -Token $tokenCloud -Realm $CloudRealm -IdpAlias $IdpAlias2
+Sync-OidcBrokerIdentityProviderIssuer -CloudBase $CloudPublicBase -Token $tokenCloud -Realm $CloudRealm `
+  -Alias $IdpAlias1 -PublicBase $OnPrem1PublicBase -IdentityRealmName $OnPremRealm
+Sync-OidcBrokerIdentityProviderIssuer -CloudBase $CloudPublicBase -Token $tokenCloud -Realm $CloudRealm `
+  -Alias $IdpAlias2 -PublicBase $OnPrem2PublicBase -IdentityRealmName $OnPremRealm
+
+Sync-UsernameTemplateMapperForBrokerIdentityProvider -CloudBase $CloudPublicBase -Token $tokenCloud -Realm $CloudRealm -IdpAlias $IdpAlias1
+Sync-UsernameTemplateMapperForBrokerIdentityProvider -CloudBase $CloudPublicBase -Token $tokenCloud -Realm $CloudRealm -IdpAlias $IdpAlias2
 
 if (-not $org1Id) {
   $org1Id = Get-OrganizationIdByAlias -CloudBase $CloudPublicBase -Token $tokenCloud -Realm $CloudRealm -Alias $Org1Alias
@@ -695,12 +850,17 @@ else {
   Write-Warning "Organization '$Org2Alias' not found; skip linking IdP '$IdpAlias2'."
 }
 
+New-CloudApiAudienceClientIfMissing -CloudBase $CloudPublicBase -Token $tokenCloud -Realm $CloudRealm `
+  -ClientId $CloudApiAudienceClientId -Secret $CloudApiAudienceClientSecret
 New-TestClientIfMissing -CloudBase $CloudPublicBase -Token $tokenCloud -Realm $CloudRealm -ClientId $TestClientId
+Add-OidcAudienceMapperToClientIfMissing -CloudBase $CloudPublicBase -Token $tokenCloud -Realm $CloudRealm `
+  -SourceClientId $TestClientId -AudienceClientId $CloudApiAudienceClientId
 
 Write-Host "`nDone."
 Write-Host "  Cloud admin console:  $CloudPublicBase/admin (realm '$CloudRealm')"
 Write-Host "  OIDC discovery:       $CloudPublicBase/realms/$CloudRealm/.well-known/openid-configuration"
-Write-Host "  Test client id:       $TestClientId"
+Write-Host "  Test client id:       $TestClientId (access token aud includes '$CloudApiAudienceClientId' for CloudAPI)"
+Write-Host "  API JWT audience:     $CloudApiAudienceClientId"
 Write-Host "  MSAL on-prem client:  $MsalOnPremClientId (realm $OnPremRealm on 8181 / 8282)"
 Write-Host "  On-prem users:        $User1Name / $User2Name"
 Write-Host "  Organizations:        $Org1Alias ($IdpAlias1), $Org2Alias ($IdpAlias2)"
